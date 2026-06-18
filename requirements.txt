@@ -1,0 +1,4 @@
+pyusb>=1.2.1
+libusb-package>=1.0.26
+Pillow>=10.0.0
+psutil>=5.9.0
