@@ -30,6 +30,8 @@ py main.py --preview                  # ekrana GÖNDERMEDEN preview.png (test)
 py main.py                            # monitor modu: CPU/GPU göstergesi, 60 fps
 py main.py --mode spectrum            # ses FFT spektrumu, 60 fps (WASAPI loopback)
 py main.py --preview --mode spectrum  # ekransız spektrum testi
+py main.py --mode net                 # ağ throughput grafiği, her frame örneklenir
+py main.py --preview --mode net       # ekransız ağ testi
 py main.py --fps 30                   # frame hızını değiştir
 
 # Ölçülen kapasite (gerçek cihaz): USB ~370 fps, render+encode ~462 fps.

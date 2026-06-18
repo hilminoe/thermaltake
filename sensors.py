@@ -45,6 +45,10 @@ class Reading:
     gpu_load: float | None = None
     ram_load: float | None = None
     fan_rpm: int | None = None
+    vram_used_mb: float | None = None
+    vram_total_mb: float | None = None
+    ram_used_gb: float | None = None
+    ram_total_gb: float | None = None
 
 
 def _num(text: str) -> float | None:
@@ -127,6 +131,11 @@ class _LHMHttp:
                         r.gpu_load = val
                 elif "RPM" in value and not is_gpu:
                     mb_fans.append((text, val))  # GPU fanlarını atla
+                elif unit == "MB" and is_gpu and cat == "data":
+                    if "memory used" in low and r.vram_used_mb is None:
+                        r.vram_used_mb = val
+                    elif "memory total" in low and r.vram_total_mb is None:
+                        r.vram_total_mb = val
                 return
 
             for c in children:
@@ -153,21 +162,28 @@ class _Nvidia:
         self.exe = shutil.which("nvidia-smi")
 
     def read(self, r: Reading) -> None:
-        if not self.exe or (r.gpu_temp is not None and r.gpu_load is not None):
+        have_all = (r.gpu_temp is not None and r.gpu_load is not None
+                    and r.vram_used_mb is not None and r.vram_total_mb is not None)
+        if not self.exe or have_all:
             return
         try:
             out = subprocess.run(
-                [self.exe, "--query-gpu=temperature.gpu,utilization.gpu",
+                [self.exe,
+                 "--query-gpu=temperature.gpu,utilization.gpu,memory.used,memory.total",
                  "--format=csv,noheader,nounits"],
                 capture_output=True, text=True, timeout=2,
                 creationflags=_NO_WINDOW,
             ).stdout.strip().splitlines()
             if out:
-                t, u = out[0].split(",")
+                t, u, mu, mt = (x.strip() for x in out[0].split(","))
                 if r.gpu_temp is None:
                     r.gpu_temp = float(t)
                 if r.gpu_load is None:
                     r.gpu_load = float(u)
+                if r.vram_used_mb is None:
+                    r.vram_used_mb = float(mu)
+                if r.vram_total_mb is None:
+                    r.vram_total_mb = float(mt)
         except Exception as e:
             log.debug("nvidia-smi hatası: %s", e)
 
@@ -184,6 +200,9 @@ class Sensors:
         self._nv.read(r)
         if r.cpu_load is None:
             r.cpu_load = psutil.cpu_percent(interval=None)
+        vm = psutil.virtual_memory()
         if r.ram_load is None:
-            r.ram_load = psutil.virtual_memory().percent
+            r.ram_load = vm.percent
+        r.ram_used_gb = (vm.total - vm.available) / 1024 ** 3
+        r.ram_total_gb = vm.total / 1024 ** 3
         return r

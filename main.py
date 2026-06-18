@@ -16,6 +16,7 @@ import colorsys
 import io
 import logging
 import math
+import os
 import time
 
 from PIL import Image, ImageDraw, ImageFont
@@ -252,6 +253,194 @@ class SpectrumRenderer:
         return img
 
 
+_HUD_BG = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                       "assets", "hud_bg.png")
+
+
+class NetRenderer:
+    """Canva'da üretilmiş dairesel HUD arka planı üstüne canlı veri bindirir:
+    merkezde kayan ağ throughput ayna-grafiği (indirme aşağı, yükleme yukarı),
+    dört köşede CPU / GPU / RAM / VRAM mini göstergeleri."""
+
+    # Merkez grafik kutusu (köşe göstergelerinin arasında kalır).
+    GX0, GX1 = 168, 312
+    GY0, GY1 = 200, 280
+    N = 120                  # geçmiş örnek sayısı (yatay çözünürlük)
+    MIN_SCALE = 1_000_000.0  # otoskala tabanı: ~1 MB/s (8 Mb/s)
+
+    def __init__(self) -> None:
+        self.down = [0.0] * self.N
+        self.up = [0.0] * self.N
+        self._peak = self.MIN_SCALE
+
+        # canlı sistem değerleri (yumuşatılmış)
+        self.cpu_load = 0.0
+        self.cpu_temp = 40.0
+        self.gpu_load = 0.0
+        self.gpu_temp = 40.0
+        self.ram_pct = 0.0
+        self.vram_pct = 0.0
+        self.ram_used = 0.0
+        self.ram_total = 0.0
+        self.vram_used = 0.0
+        self.vram_total = 0.0
+
+        try:
+            self._bg = Image.open(_HUD_BG).convert("RGB")
+            if self._bg.size != (SIZE, SIZE):
+                self._bg = self._bg.resize((SIZE, SIZE))
+        except Exception as e:
+            log.warning("HUD arka planı yüklenemedi (%s) — düz zemin.", e)
+            self._bg = Image.new("RGB", (SIZE, SIZE), BG)
+
+    def push(self, down_bps: float, up_bps: float) -> None:
+        self.down.append(down_bps)
+        self.down.pop(0)
+        self.up.append(up_bps)
+        self.up.pop(0)
+
+    def update_stats(self, r: Reading, dt: float) -> None:
+        rate = min(1.0, dt * 6.0)
+        if r.cpu_load is not None:
+            self.cpu_load = _smooth(self.cpu_load, r.cpu_load, rate)
+        if r.cpu_temp is not None:
+            self.cpu_temp = _smooth(self.cpu_temp, r.cpu_temp, rate)
+        if r.gpu_load is not None:
+            self.gpu_load = _smooth(self.gpu_load, r.gpu_load, rate)
+        if r.gpu_temp is not None:
+            self.gpu_temp = _smooth(self.gpu_temp, r.gpu_temp, rate)
+        if r.ram_load is not None:
+            self.ram_pct = _smooth(self.ram_pct, r.ram_load, rate)
+        if r.ram_used_gb is not None:
+            self.ram_used, self.ram_total = r.ram_used_gb, r.ram_total_gb or 0.0
+        if r.vram_used_mb is not None and r.vram_total_mb:
+            self.vram_used = r.vram_used_mb / 1024.0
+            self.vram_total = r.vram_total_mb / 1024.0
+            self.vram_pct = _smooth(self.vram_pct,
+                                    100.0 * r.vram_used_mb / r.vram_total_mb, rate)
+
+    @staticmethod
+    def _fmt(bps: float) -> str:
+        bits = bps * 8.0
+        if bits >= 1e9:
+            return f"{bits / 1e9:.2f} Gb/s"
+        if bits >= 1e6:
+            return f"{bits / 1e6:.1f} Mb/s"
+        if bits >= 1e3:
+            return f"{bits / 1e3:.0f} Kb/s"
+        return f"{bits:.0f} b/s"
+
+    def _gauge(self, d, cx, cy, frac, color, value, sub, label) -> None:
+        r = 54
+        box = [cx - r, cy - r, cx + r, cy + r]
+        d.arc(box, 135, 135 + 270, fill=RING_BG, width=11)
+        frac = max(0.0, min(1.0, frac))
+        if frac > 0:
+            d.arc(box, 135, 135 + 270 * frac, fill=color, width=11)
+        _centered_at(d, cx, cy - r - 16, label, F_TINY, MUTED)
+        _centered_at(d, cx, cy - 11, value, F_SMALL, TEXT)
+        _centered_at(d, cx, cy + 18, sub, F_MICRO, color)
+
+    def draw(self, t: float) -> Image.Image:
+        img = self._bg.copy()
+        d = ImageDraw.Draw(img)
+
+        mid = (self.GY0 + self.GY1) // 2
+        half = (self.GY1 - self.GY0) / 2.0
+        target = max(self.MIN_SCALE, max(self.down), max(self.up))
+        self._peak += (target - self._peak) * 0.10
+        peak = max(self.MIN_SCALE, self._peak)
+
+        def x_of(i):
+            return self.GX0 + (self.GX1 - self.GX0) * i / (self.N - 1)
+
+        down_pts = [(self.GX0, mid)]
+        up_pts = [(self.GX0, mid)]
+        for i in range(self.N):
+            x = x_of(i)
+            down_pts.append((x, mid + min(1.0, self.down[i] / peak) * half))
+            up_pts.append((x, mid - min(1.0, self.up[i] / peak) * half))
+        down_pts.append((self.GX1, mid))
+        up_pts.append((self.GX1, mid))
+
+        d.polygon(down_pts, fill=_blend(BG, BLUE, 0.55))
+        d.polygon(up_pts, fill=_blend(BG, CORAL, 0.55))
+        d.line(down_pts[1:-1], fill=BLUE, width=2)
+        d.line(up_pts[1:-1], fill=CORAL, width=2)
+        d.line([(self.GX0, mid), (self.GX1, mid)], fill=RING_BG, width=1)
+
+        # köşe göstergeleri: kare panelin gerçek köşelerine yakın.
+        # CPU / GPU üst, RAM / VRAM alt.
+        self._gauge(d, 100, 110, self.cpu_load / 100, _temp_color(self.cpu_temp),
+                    f"{self.cpu_load:.0f}%", f"{self.cpu_temp:.0f}°", "CPU")
+        self._gauge(d, 380, 110, self.gpu_load / 100, _temp_color(self.gpu_temp),
+                    f"{self.gpu_load:.0f}%", f"{self.gpu_temp:.0f}°", "GPU")
+        self._gauge(d, 100, 374, self.ram_pct / 100, (118, 150, 200),
+                    f"{self.ram_pct:.0f}%",
+                    f"{self.ram_used:.1f}/{self.ram_total:.0f}G", "RAM")
+        self._gauge(d, 380, 374, self.vram_pct / 100, TEAL,
+                    f"{self.vram_pct:.0f}%",
+                    f"{self.vram_used:.1f}/{self.vram_total:.0f}G", "VRAM")
+
+        # ağ okumaları: yükleme üst-orta, indirme alt-orta
+        _centered_at(d, CENTER, mid - half - 22, self._fmt(self.up[-1]),
+                     F_SMALL, CORAL)
+        _centered_at(d, CENTER, mid - half - 44, "▲ UP", F_MICRO, MUTED)
+        _centered_at(d, CENTER, mid + half + 22, self._fmt(self.down[-1]),
+                     F_SMALL, BLUE)
+        _centered_at(d, CENTER, mid + half + 44, "▼ DOWN", F_MICRO, MUTED)
+        _centered_at(d, CENTER, SIZE - 14, "developed by Hilmi Noe", F_MICRO, MUTED)
+        return img
+
+
+def run_net(fps: int) -> None:
+    from trcc_lcd import TrccLcd, encode_rgb565
+    from netflow import NetFlow
+
+    lcd = TrccLcd()
+    _open_with_retry(lcd)
+    log.info("Ağ modu — ekran %dx%d %s", lcd.width, lcd.height,
+             "JPEG" if lcd.jpeg else "RGB565")
+    flow = NetFlow()
+    sensors = Sensors()
+    rend = NetRenderer()
+
+    frame_dt = 1.0 / fps
+    last = time.perf_counter()
+    start = last
+    last_sensor = 0.0
+    reading = sensors.read()
+    try:
+        while True:
+            now = time.perf_counter()
+            dt = now - last
+            last = now
+
+            if now - last_sensor >= 1.0:     # sistem sensörleri ~1 Hz
+                reading = sensors.read()
+                last_sensor = now
+
+            down, up = flow.poll()           # ağ ~fps Hz (her frame taze)
+            rend.push(down, up)
+            rend.update_stats(reading, dt)
+            img = rend.draw(now - start)
+
+            if lcd.jpeg:
+                buf = io.BytesIO()
+                img.save(buf, format="JPEG", quality=88)
+                lcd.send(buf.getvalue())
+            else:
+                lcd.send(encode_rgb565(img))
+
+            sleep = frame_dt - (time.perf_counter() - now)
+            if sleep > 0:
+                time.sleep(sleep)
+    except KeyboardInterrupt:
+        log.info("Durduruluyor.")
+    finally:
+        lcd.close()
+
+
 def run_spectrum(fps: int) -> None:
     from audio import AudioSpectrum
     from trcc_lcd import TrccLcd, encode_rgb565
@@ -367,6 +556,34 @@ def run_preview(fps: int, seconds: float, mode: str = "monitor") -> None:
             log.info("preview.png yazıldı (spectrum, %dx%d).", SIZE, SIZE)
         return
 
+    if mode == "net":
+        from netflow import NetFlow
+
+        flow = NetFlow()
+        sensors = Sensors()
+        rend = NetRenderer()
+        start = time.perf_counter()
+        last = start
+        last_sensor = 0.0
+        reading = sensors.read()
+        img = None
+        while time.perf_counter() - start < seconds:
+            now = time.perf_counter()
+            dt = now - last
+            last = now
+            if now - last_sensor >= 1.0:
+                reading = sensors.read()
+                last_sensor = now
+            down, up = flow.poll()
+            rend.push(down, up)
+            rend.update_stats(reading, dt)
+            img = rend.draw(now - start)
+            time.sleep(1.0 / fps)
+        if img is not None:
+            img.save("preview.png")
+            log.info("preview.png yazıldı (net, %dx%d).", SIZE, SIZE)
+        return
+
     sensors = Sensors()
     rend = Renderer()
     start = time.perf_counter()
@@ -393,8 +610,10 @@ def run_preview(fps: int, seconds: float, mode: str = "monitor") -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(description="Thermalright LCD canlı monitör")
     ap.add_argument("--fps", type=int, default=60, help="hedef frame hızı")
-    ap.add_argument("--mode", choices=("monitor", "spectrum"), default="monitor",
-                    help="monitor = sistem göstergesi, spectrum = ses FFT")
+    ap.add_argument("--mode", choices=("monitor", "spectrum", "net"),
+                    default="monitor",
+                    help="monitor = sistem göstergesi, spectrum = ses FFT, "
+                         "net = ağ throughput grafiği")
     ap.add_argument("--preview", action="store_true",
                     help="ekrana göndermeden preview.png üret")
     ap.add_argument("--seconds", type=float, default=3.0,
@@ -405,6 +624,8 @@ def main() -> None:
         run_preview(args.fps, args.seconds, args.mode)
     elif args.mode == "spectrum":
         run_spectrum(args.fps)
+    elif args.mode == "net":
+        run_net(args.fps)
     else:
         run_live(args.fps)
 
