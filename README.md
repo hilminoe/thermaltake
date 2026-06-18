@@ -42,6 +42,17 @@ py main.py --fps 30                   # frame hızını değiştir
 İlk olarak `--preview` ile `preview.png`'ye bak — render doğruysa `py main.py`
 ile gerçek ekrana geç.
 
+## Otomatik başlatma (her oturum açılışında)
+
+`setup_lcd.ps1`, servisi oturum açılışında pencere açmadan başlatan bir
+zamanlanmış görev (`ThermalrightLCD`) kaydeder — yönetici gerekmez:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File setup_lcd.ps1                 # net modu
+powershell -ExecutionPolicy Bypass -File setup_lcd.ps1 -Mode monitor   # başka mod
+Start-ScheduledTask -TaskName ThermalrightLCD                          # hemen başlat
+```
+
 ## Sıcaklık değerleri "--" görünüyorsa
 
 CPU/GPU sıcaklığı için **LibreHardwareMonitor**'ı yönetici olarak çalıştır
@@ -58,7 +69,9 @@ WMI bağlanması için ek paket: `py -m pip install wmi pywin32`.
 | `trcc_lcd.py` | USB protokolü: handshake + 64-byte header + JPEG/RGB565 frame |
 | `sensors.py`  | LHM (WMI) → nvidia-smi → psutil kademeli sensör okuma |
 | `audio.py`    | WASAPI loopback yakalama + Hann pencereli FFT band analizi |
-| `main.py`     | 60 fps render döngüsü; monitor + spectrum modları |
+| `main.py`     | 60 fps render döngüsü; monitor + spectrum + net modları |
+| `netflow.py`  | psutil sayaçlarından anlık ağ throughput örnekleyici |
+| `setup_lcd.ps1` | oturum açılışında otomatik başlatma görevini kaydeder |
 | `bench.py`    | gerçek cihazda frame gönderim hızı ölçümü |
 
 ## Protokol notları
